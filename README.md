@@ -1,4 +1,4 @@
-<img width="1200" height="768" alt="ghosttuner" src="https://github.com/user-attachments/assets/a2299f58-bac0-4fab-9f7a-0b234cf22940" />
+<img width="1000" height="700" alt="ghosttuner" src="https://github.com/user-attachments/assets/a2299f58-bac0-4fab-9f7a-0b234cf22940" />
 
 🎛️ Ghost Tuner: Neural Overdrive
 
