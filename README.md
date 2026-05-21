@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="ghosttuner.png" alt="Ghost Tuner Logo" width="300">
+  <img src="ghosttuner.png" alt="Ghost Tuner Logo" width="350">
 </p>
 🎛️ Ghost Tuner: Neural Overdrive
 
