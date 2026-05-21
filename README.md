@@ -1,3 +1,9 @@
+🎛️ Ghost Tuner: Neural Overdrive
+
+Ghost Tuner is a simple yet powerful Windows performance companion designed to eliminate lag, stop screen freezing, and ensure your processor focuses entirely on making your games run at peak performance.
+
+Instead of dealing with complicated Windows settings menus or risky modifications, Ghost Tuner allows you to optimize your operating system with simple clicks. It also includes an advanced background AI module that acts like a private mechanic, listening to system warnings and fixing errors in real time before they can cause game crashes. 🚀
+
 🕹️ Control Panel Guide (What the Buttons Do)
 
 Here is a plain-English breakdown of every single button on the Ghost Tuner interface, written exactly as they appear on your screen:
