@@ -1,3 +1,5 @@
+<img width="1200" height="768" alt="ghosttuner" src="https://github.com/user-attachments/assets/a2299f58-bac0-4fab-9f7a-0b234cf22940" />
+
 🎛️ Ghost Tuner: Neural Overdrive
 
 Ghost Tuner is a simple yet powerful Windows performance companion designed to eliminate lag, stop screen freezing, and ensure your processor focuses entirely on making your games run at peak performance.
