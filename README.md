@@ -57,5 +57,6 @@ When to use it: Apply this once to enjoy a smoother, more consistent frame layou
 What it does: Lets you control the maximum allowed speed capacity of your CPU. When gaming mode is inactive, lowering this cap allows your PC to run much cooler and save electricity. The moment a game is detected, Ghost Tuner automatically bypasses this limit and unlocks 100% full speed.
 ☀️ / 🌙 (Theme Toggle):
 What it does: Instantly switches the entire interface layout look between a clean, bright Light Mode and a comfortable, sleek Dark Mode.
+
 🧠 AI AUTO-OPTIMIZER (Switch):
 What it does: Located at the top right of the application window. When switched on, it allows the Gemini AI engine to actively analyze live computer error log files, automatically deploying secure hotfixes behind the scenes to keep games from crashing. Turn it off if you want to use the performance buttons purely manually without automated intervention.
