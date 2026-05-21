@@ -1,0 +1,22 @@
+# --- Environment Variables (CRITICAL: Never leak your API Key) ---
+.env
+.env.local
+
+# --- PyInstaller & Build Outputs (Junk executables/folders) ---
+build/
+dist/
+*.spec
+
+# --- Python compilation caches ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Operating System Junk ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Local Project Cache Data ---
+mastered_faults.json
