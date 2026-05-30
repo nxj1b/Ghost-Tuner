@@ -76,6 +76,19 @@ class GhostTuner:
         self.setup_ui()
         self.refresh_persistence_display()
 
+        # ── DEFAULT BOTH SWITCHES TO ON ───────────────────────────────────
+        # Startup switch: reflect real registry state; write it if not already set
+        if self.is_startup_enabled():
+            self.startup_switch.select()
+        else:
+            self.startup_switch.select()          # default ON
+            self.set_startup_registry(True)       # write registry silently
+
+        # Auto-start engine switch: default ON, then fire the engine
+        self.autostart_switch.select()
+        self.window.after(500, self._autostart_engine_if_enabled)
+        # ─────────────────────────────────────────────────────────────────
+
     # Safe logger before UI exists — buffers messages and flushes after setup
     def log_ai_event_safe(self, m):
         if not hasattr(self, '_pre_ui_logs'):
@@ -690,6 +703,56 @@ class GhostTuner:
                     self.fixes_text.insert("end", f"   ↳ {c}\n")
                 self.fixes_text.insert("end", "-"*40 + "\n")
 
+    # ── STARTUP REGISTRY ─────────────────────────────────────────────────────
+    STARTUP_REG_KEY  = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    STARTUP_REG_NAME = "GhostTuner"
+
+    def _startup_cmd(self):
+        """Return the command string stored in / read from the registry."""
+        return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+    def is_startup_enabled(self):
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.STARTUP_REG_KEY, 0, winreg.KEY_READ)
+            val, _ = winreg.QueryValueEx(key, self.STARTUP_REG_NAME)
+            winreg.CloseKey(key)
+            return val == self._startup_cmd()
+        except Exception:
+            return False
+
+    def set_startup_registry(self, enable: bool):
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.STARTUP_REG_KEY, 0, winreg.KEY_SET_VALUE)
+            if enable:
+                winreg.SetValueEx(key, self.STARTUP_REG_NAME, 0, winreg.REG_SZ, self._startup_cmd())
+                self.log_event("🔁 STARTUP: Ghost Tuner will launch automatically on login.", "success")
+            else:
+                try:
+                    winreg.DeleteValue(key, self.STARTUP_REG_NAME)
+                except FileNotFoundError:
+                    pass
+                self.log_event("🔁 STARTUP: Auto-launch on login disabled.", "info")
+            winreg.CloseKey(key)
+        except Exception as e:
+            self.log_event(f"❌ STARTUP: Registry write failed — {e}", "info")
+
+    def _on_startup_toggle(self):
+        self.set_startup_registry(self.startup_switch.get() == 1)
+
+    def _on_autostart_toggle(self):
+        if self.autostart_switch.get() == 1:
+            self.log_event("⚡ AUTO-START: Engine will initialise automatically on next launch.", "success")
+        else:
+            self.log_event("⚡ AUTO-START: Engine auto-initialise disabled.", "info")
+
+    def _autostart_engine_if_enabled(self):
+        """Called once after the UI is ready. Starts monitoring if the switch is ON."""
+        if self.autostart_switch.get() == 1:
+            self.start_monitoring()
+    # ─────────────────────────────────────────────────────────────────────────
+
     def setup_ui(self):
         ctk.set_appearance_mode("dark")
         self.window = ctk.CTk()
@@ -737,6 +800,29 @@ class GhostTuner:
         # ── NEW FEATURE BUTTONS ────────────────────────────────────────────
         self.create_side_btn("🧽 WIPE SHADER CACHE", self.clear_shader_cache, "transparent", self.cyan, border=1)
         self.create_side_btn("💾 FIX PAGEFILE SIZE", self.set_fixed_pagefile, "transparent", self.cyan, border=1)
+        # ──────────────────────────────────────────────────────────────────
+
+        # ── STARTUP / AUTO-START SWITCHES ─────────────────────────────────
+        sw_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        sw_frame.pack(padx=25, pady=(10, 0), fill="x")
+
+        self.startup_switch = ctk.CTkSwitch(
+            sw_frame, text="LAUNCH ON STARTUP",
+            font=("Segoe UI", 11, "bold"),
+            progress_color=self.cyan,
+            text_color=("#1A1A1E", "white"),
+            command=self._on_startup_toggle,
+        )
+        self.startup_switch.pack(anchor="w", pady=(0, 8))
+
+        self.autostart_switch = ctk.CTkSwitch(
+            sw_frame, text="START ENGINE ON LAUNCH",
+            font=("Segoe UI", 11, "bold"),
+            progress_color=self.cyan,
+            text_color=("#1A1A1E", "white"),
+            command=self._on_autostart_toggle,
+        )
+        self.autostart_switch.pack(anchor="w", pady=(0, 4))
         # ──────────────────────────────────────────────────────────────────
 
         self.slider_label = ctk.CTkLabel(self.sidebar, text="Dynamic Core Cap: 100%", font=("Consolas", 12, "bold"), text_color=("#3F3F46", "#A1A1AA"))
