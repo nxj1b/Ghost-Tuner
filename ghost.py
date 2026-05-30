@@ -8,9 +8,18 @@ import ctypes
 import sys
 from datetime import datetime
 import psutil
-from PIL import Image
+from PIL import Image, ImageDraw
 from dotenv import load_dotenv
 import queue
+
+try:
+    import pystray
+    PYSTRAY_AVAILABLE = True
+except ImportError:
+    PYSTRAY_AVAILABLE = False
+
+# Persistent settings file (same folder as the script)
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ghost_settings.json")
 
 # --- 🛡️ ADMIN ELEVATION ---
 def is_admin():
@@ -50,6 +59,16 @@ class GhostTuner:
         self.essential_procs = ["explorer.exe", "ghost.py", "python.exe", "svchost.exe", "dwm.exe"]
         self.mastered_ids = self.load_mastery()
 
+        # ── PERSISTENT SETTINGS ───────────────────────────────────────────────
+        self._settings = self._load_settings()
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── TRAY STATE ────────────────────────────────────────────────────────
+        self._tray_icon = None          # pystray.Icon instance (created on first minimize)
+        self._tray_thread = None        # thread running the tray icon
+        self._is_in_tray = False        # True while window is hidden to tray
+        # ─────────────────────────────────────────────────────────────────────
+
         # ── ERROR QUEUE ───────────────────────────────────────────────────────
         # Holds (ev_id, msg) tuples that arrived while the AI was busy.
         # A dedicated daemon thread drains the queue sequentially, waiting for
@@ -76,18 +95,167 @@ class GhostTuner:
         self.setup_ui()
         self.refresh_persistence_display()
 
-        # ── DEFAULT BOTH SWITCHES TO ON ───────────────────────────────────
-        # Startup switch: reflect real registry state; write it if not already set
-        if self.is_startup_enabled():
-            self.startup_switch.select()
-        else:
-            self.startup_switch.select()          # default ON
-            self.set_startup_registry(True)       # write registry silently
+        # ── APPLY STARTUP PREFERENCES ─────────────────────────────────────────
+        # Sync registry startup entry to match the toggle state
+        self._apply_startup_registry()
 
-        # Auto-start engine switch: default ON, then fire the engine
-        self.autostart_switch.select()
-        self.window.after(500, self._autostart_engine_if_enabled)
-        # ─────────────────────────────────────────────────────────────────
+        # If "start engine on launch" is on, kick off monitoring automatically
+        if self._settings.get("auto_start_engine", True):
+            self.window.after(500, self.start_monitoring)
+
+        # If "start minimized" is on, hide to tray right after the window appears
+        if self._settings.get("start_minimized", False):
+            self.window.after(200, self._minimize_to_tray)
+        # ─────────────────────────────────────────────────────────────────────
+
+    # ── SETTINGS PERSISTENCE ─────────────────────────────────────────────────
+    def _load_settings(self):
+        defaults = {
+            "launch_on_startup":   True,
+            "auto_start_engine":   True,
+            "minimize_on_close":   True,
+            "start_minimized":     False,
+        }
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r") as f:
+                    saved = json.load(f)
+                defaults.update(saved)
+            except Exception:
+                pass
+        return defaults
+
+    def _save_settings(self):
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(self._settings, f, indent=4)
+        except Exception:
+            pass
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── LAUNCH ON STARTUP (Windows registry) ─────────────────────────────────
+    def _apply_startup_registry(self):
+        """Add or remove the app from HKCU Run based on the toggle."""
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        app_name  = "GhostTuner"
+        exe_path  = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+            if self._settings.get("launch_on_startup", True):
+                winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, exe_path)
+            else:
+                try:
+                    winreg.DeleteValue(key, app_name)
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+
+    def _toggle_startup(self):
+        self._settings["launch_on_startup"] = bool(self.startup_switch.get())
+        self._save_settings()
+        self._apply_startup_registry()
+
+    def _toggle_auto_engine(self):
+        self._settings["auto_start_engine"] = bool(self.auto_engine_switch.get())
+        self._save_settings()
+
+    def _toggle_minimize_on_close(self):
+        self._settings["minimize_on_close"] = bool(self.minimize_close_switch.get())
+        self._save_settings()
+
+    def _toggle_start_minimized(self):
+        self._settings["start_minimized"] = bool(self.start_minimized_switch.get())
+        self._save_settings()
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── SYSTEM TRAY ──────────────────────────────────────────────────────────
+    def _build_tray_icon_image(self):
+        """Create a simple cyan ghost icon for the system tray."""
+        size = 64
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # Body (rounded top rectangle)
+        draw.ellipse([8, 4, 56, 44], fill=(0, 245, 255, 255))
+        draw.rectangle([8, 24, 56, 56], fill=(0, 245, 255, 255))
+        # Wavy bottom
+        for i in range(4):
+            x = 8 + i * 12
+            draw.ellipse([x, 48, x + 12, 60], fill=(0, 0, 0, 0))
+        # Eyes
+        draw.ellipse([18, 16, 28, 28], fill=(8, 8, 10, 255))
+        draw.ellipse([36, 16, 46, 28], fill=(8, 8, 10, 255))
+        return img
+
+    def _show_window_from_tray(self):
+        """Restore the main window from the system tray."""
+        self._is_in_tray = False
+        self.window.after(0, self._do_show_window)
+
+    def _do_show_window(self):
+        self.window.deiconify()
+        self.window.lift()
+        self.window.focus_force()
+        # Stop the tray icon
+        if self._tray_icon:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+
+    def _minimize_to_tray(self):
+        """Hide the window and show a system tray icon instead."""
+        if not PYSTRAY_AVAILABLE:
+            self.window.iconify()
+            return
+        self._is_in_tray = True
+        self.window.withdraw()   # hide from taskbar & screen
+
+        if self._tray_icon is None:
+            icon_image = self._build_tray_icon_image()
+            menu = pystray.Menu(
+                pystray.MenuItem("Open Ghost Tuner", self._show_window_from_tray, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Exit", self._quit_from_tray),
+            )
+            self._tray_icon = pystray.Icon(
+                "GhostTuner",
+                icon_image,
+                "Ghost Tuner: Neural Overdrive",
+                menu,
+            )
+            self._tray_thread = threading.Thread(target=self._tray_icon.run, daemon=True)
+            self._tray_thread.start()
+
+    def _quit_from_tray(self):
+        """Full exit triggered from the tray menu."""
+        self._is_in_tray = False
+        if self._tray_icon:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+        self.window.after(0, self.window.destroy)
+
+    def _on_close(self):
+        """Intercept the window X button."""
+        if self._settings.get("minimize_on_close", True):
+            self._minimize_to_tray()
+        else:
+            self._real_quit()
+
+    def _real_quit(self):
+        self.is_monitoring = False
+        if self._tray_icon:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+        self.window.destroy()
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Safe logger before UI exists — buffers messages and flushes after setup
     def log_ai_event_safe(self, m):
@@ -703,61 +871,12 @@ class GhostTuner:
                     self.fixes_text.insert("end", f"   ↳ {c}\n")
                 self.fixes_text.insert("end", "-"*40 + "\n")
 
-    # ── STARTUP REGISTRY ─────────────────────────────────────────────────────
-    STARTUP_REG_KEY  = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-    STARTUP_REG_NAME = "GhostTuner"
-
-    def _startup_cmd(self):
-        """Return the command string stored in / read from the registry."""
-        return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
-
-    def is_startup_enabled(self):
-        try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.STARTUP_REG_KEY, 0, winreg.KEY_READ)
-            val, _ = winreg.QueryValueEx(key, self.STARTUP_REG_NAME)
-            winreg.CloseKey(key)
-            return val == self._startup_cmd()
-        except Exception:
-            return False
-
-    def set_startup_registry(self, enable: bool):
-        try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.STARTUP_REG_KEY, 0, winreg.KEY_SET_VALUE)
-            if enable:
-                winreg.SetValueEx(key, self.STARTUP_REG_NAME, 0, winreg.REG_SZ, self._startup_cmd())
-                self.log_event("🔁 STARTUP: Ghost Tuner will launch automatically on login.", "success")
-            else:
-                try:
-                    winreg.DeleteValue(key, self.STARTUP_REG_NAME)
-                except FileNotFoundError:
-                    pass
-                self.log_event("🔁 STARTUP: Auto-launch on login disabled.", "info")
-            winreg.CloseKey(key)
-        except Exception as e:
-            self.log_event(f"❌ STARTUP: Registry write failed — {e}", "info")
-
-    def _on_startup_toggle(self):
-        self.set_startup_registry(self.startup_switch.get() == 1)
-
-    def _on_autostart_toggle(self):
-        if self.autostart_switch.get() == 1:
-            self.log_event("⚡ AUTO-START: Engine will initialise automatically on next launch.", "success")
-        else:
-            self.log_event("⚡ AUTO-START: Engine auto-initialise disabled.", "info")
-
-    def _autostart_engine_if_enabled(self):
-        """Called once after the UI is ready. Starts monitoring if the switch is ON."""
-        if self.autostart_switch.get() == 1:
-            self.start_monitoring()
-    # ─────────────────────────────────────────────────────────────────────────
-
     def setup_ui(self):
         ctk.set_appearance_mode("dark")
         self.window = ctk.CTk()
         self.window.title("GHOST TUNER: NEURAL OVERDRIVE [EXTREME]")
         self.window.geometry("1280x850")
+        self.window.protocol("WM_DELETE_WINDOW", self._on_close)
         
         self.cyan = ("#007A87", "#00F5FF")
         self.magenta = ("#B5179E", "#D946EF")
@@ -802,27 +921,50 @@ class GhostTuner:
         self.create_side_btn("💾 FIX PAGEFILE SIZE", self.set_fixed_pagefile, "transparent", self.cyan, border=1)
         # ──────────────────────────────────────────────────────────────────
 
-        # ── STARTUP / AUTO-START SWITCHES ─────────────────────────────────
-        sw_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        sw_frame.pack(padx=25, pady=(10, 0), fill="x")
+        # ── SYSTEM BEHAVIOUR TOGGLES ───────────────────────────────────────
+        toggles_frame = ctk.CTkFrame(self.sidebar, fg_color=self.card_bg, corner_radius=12, border_width=1, border_color=self.border_blue)
+        toggles_frame.pack(fill="x", padx=20, pady=(10, 6))
+        ctk.CTkLabel(toggles_frame, text="⚙ SYSTEM BEHAVIOUR", font=("Consolas", 11, "bold"), text_color=self.cyan).pack(pady=(10, 4))
 
         self.startup_switch = ctk.CTkSwitch(
-            sw_frame, text="LAUNCH ON STARTUP",
+            toggles_frame, text="LAUNCH ON STARTUP",
             font=("Segoe UI", 11, "bold"),
-            progress_color=self.cyan,
-            text_color=("#1A1A1E", "white"),
-            command=self._on_startup_toggle,
+            progress_color=self.cyan, text_color=("#1A1A1E", "white"),
+            command=self._toggle_startup,
         )
-        self.startup_switch.pack(anchor="w", pady=(0, 8))
+        if self._settings.get("launch_on_startup", True):
+            self.startup_switch.select()
+        self.startup_switch.pack(anchor="w", padx=15, pady=5)
 
-        self.autostart_switch = ctk.CTkSwitch(
-            sw_frame, text="START ENGINE ON LAUNCH",
+        self.auto_engine_switch = ctk.CTkSwitch(
+            toggles_frame, text="START ENGINE ON LAUNCH",
             font=("Segoe UI", 11, "bold"),
-            progress_color=self.cyan,
-            text_color=("#1A1A1E", "white"),
-            command=self._on_autostart_toggle,
+            progress_color=self.cyan, text_color=("#1A1A1E", "white"),
+            command=self._toggle_auto_engine,
         )
-        self.autostart_switch.pack(anchor="w", pady=(0, 4))
+        if self._settings.get("auto_start_engine", True):
+            self.auto_engine_switch.select()
+        self.auto_engine_switch.pack(anchor="w", padx=15, pady=5)
+
+        self.minimize_close_switch = ctk.CTkSwitch(
+            toggles_frame, text="MINIMIZE ON CLOSE",
+            font=("Segoe UI", 11, "bold"),
+            progress_color=self.cyan, text_color=("#1A1A1E", "white"),
+            command=self._toggle_minimize_on_close,
+        )
+        if self._settings.get("minimize_on_close", True):
+            self.minimize_close_switch.select()
+        self.minimize_close_switch.pack(anchor="w", padx=15, pady=5)
+
+        self.start_minimized_switch = ctk.CTkSwitch(
+            toggles_frame, text="START MINIMIZED",
+            font=("Segoe UI", 11, "bold"),
+            progress_color=self.cyan, text_color=("#1A1A1E", "white"),
+            command=self._toggle_start_minimized,
+        )
+        if self._settings.get("start_minimized", False):
+            self.start_minimized_switch.select()
+        self.start_minimized_switch.pack(anchor="w", padx=15, pady=(5, 12))
         # ──────────────────────────────────────────────────────────────────
 
         self.slider_label = ctk.CTkLabel(self.sidebar, text="Dynamic Core Cap: 100%", font=("Consolas", 12, "bold"), text_color=("#3F3F46", "#A1A1AA"))
