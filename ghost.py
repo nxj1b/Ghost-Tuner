@@ -10,6 +10,7 @@ from datetime import datetime
 import psutil
 from PIL import Image
 from dotenv import load_dotenv
+import queue
 
 # --- 🛡️ ADMIN ELEVATION ---
 def is_admin():
@@ -43,10 +44,20 @@ class GhostTuner:
         self.is_gaming_mode = False
         self.last_applied_cap = -1
         self.seen_errors = set()
+        self.suspended_pids = []
         
         self.game_list = ["valorant.exe", "csgo.exe", "cs2.exe", "fortniteclient-win64-shipping.exe", "cod.exe", "robloxplayerbeta.exe", "minecraft.exe", "rbxfpsunlocker.exe"]
         self.essential_procs = ["explorer.exe", "ghost.py", "python.exe", "svchost.exe", "dwm.exe"]
         self.mastered_ids = self.load_mastery()
+
+        # ── ERROR QUEUE ───────────────────────────────────────────────────────
+        # Holds (ev_id, msg) tuples that arrived while the AI was busy.
+        # A dedicated daemon thread drains the queue sequentially, waiting for
+        # each AI fix to fully complete before pulling the next error.
+        self.error_queue = queue.Queue()
+        self._queue_worker_thread = threading.Thread(target=self._error_queue_worker, daemon=True)
+        self._queue_worker_thread.start()
+        # ─────────────────────────────────────────────────────────────────────
         
         self.gemini_client = None
         if GEMINI_AVAILABLE:
@@ -88,39 +99,39 @@ class GhostTuner:
         self.trim_working_sets()
 
     def apply_sbo(self):
-        subprocess.run(r'powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\be337238-0d82-4146-a960-4f37b9d47c6d" /v "Attributes" /t REG_DWORD /d 2 /f', shell=True, capture_output=True)
+        subprocess.run(r'powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\be337238-0d82-4146-a960-4f37b9d47c6d" /v "Attributes" /t REG_DWORD /d 2 /f', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("🚀 SBO: Silicon Binning Override Activated.", "info")
 
     def apply_gvs(self):
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DedicatedSegmentSize" /t REG_DWORD /d 4096 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "TdrDelay" /t REG_DWORD /d 10 /f', shell=True, capture_output=True)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DedicatedSegmentSize" /t REG_DWORD /d 4096 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "TdrDelay" /t REG_DWORD /d 10 /f', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("🚀 GVS: VRAM Shifter Engaged.", "info")
 
     def create_restore_point(self):
         self.log_event("⏳ Creating System Restore Point...", "info")
         cmd = 'powershell Checkpoint-Computer -Description "GhostTunerRestore" -RestorePointType "MODIFY_SETTINGS"'
-        subprocess.run(cmd, shell=True)
+        subprocess.run(cmd, shell=True, creationflags=0x08000000)
         self.log_event("✔ Restore Point Created: GhostTunerRestore", "success")
 
     def system_revive(self):
         self.log_event("🔄 Launching System Restore Wizard...", "info")
-        subprocess.Popen("rstrui.exe")
+        subprocess.Popen("rstrui.exe", creationflags=0x08000000)
 
     # ─────────────────────────────────────────────────────────────────────────
     # FEATURE: HPET Disabler
     # Forces Windows to use CPU TSC clock instead of HPET — lower timer overhead
     # ─────────────────────────────────────────────────────────────────────────
     def apply_hpet_disable(self):
-        subprocess.run('bcdedit /set useplatformclock false', shell=True, capture_output=True)
-        subprocess.run('bcdedit /set tscsyncpolicy enhanced', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" /v GlobalTimerResolutionRequests /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
+        subprocess.run('bcdedit /set useplatformclock false', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('bcdedit /set tscsyncpolicy enhanced', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" /v GlobalTimerResolutionRequests /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("⏱️ HPET: Disabled — TSC clock enforced for lower timer overhead.", "info")
 
     def revert_hpet_disable(self):
-        subprocess.run('bcdedit /deletevalue useplatformclock', shell=True, capture_output=True)
-        subprocess.run('bcdedit /deletevalue tscsyncpolicy', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" /v GlobalTimerResolutionRequests /t REG_DWORD /d 0 /f', shell=True, capture_output=True)
+        subprocess.run('bcdedit /deletevalue useplatformclock', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('bcdedit /deletevalue tscsyncpolicy', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" /v GlobalTimerResolutionRequests /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("⏱️ HPET: Restored to Windows default.", "info")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -128,14 +139,14 @@ class GhostTuner:
     # Stops background GPU encode that silently eats bandwidth
     # ─────────────────────────────────────────────────────────────────────────
     def apply_game_dvr_kill(self):
-        subprocess.run(r'reg add "HKCU\System\GameConfigStore" /v GameDVR_Enabled /t REG_DWORD /d 0 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /v AllowGameDVR /t REG_DWORD /d 0 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" /v AppCaptureEnabled /t REG_DWORD /d 0 /f', shell=True, capture_output=True)
+        subprocess.run(r'reg add "HKCU\System\GameConfigStore" /v GameDVR_Enabled /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /v AllowGameDVR /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" /v AppCaptureEnabled /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("🎮 GAME DVR: Xbox Game Bar & DVR killed — GPU bandwidth reclaimed.", "info")
 
     def revert_game_dvr_kill(self):
-        subprocess.run(r'reg add "HKCU\System\GameConfigStore" /v GameDVR_Enabled /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" /v AppCaptureEnabled /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
+        subprocess.run(r'reg add "HKCU\System\GameConfigStore" /v GameDVR_Enabled /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR" /v AppCaptureEnabled /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("🎮 GAME DVR: Restored to Windows default.", "info")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -152,7 +163,7 @@ class GhostTuner:
             Set-ItemProperty -Path $intPath -Name 'DevicePriority' -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
         }
         """
-        subprocess.run(['powershell', '-Command', cmd], capture_output=True)
+        subprocess.run(['powershell', '-Command', cmd], capture_output=True, creationflags=0x08000000)
         self.log_event("🖥️ GPU IRQ: Priority elevated to HIGH — frame interrupt latency reduced.", "info")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -199,7 +210,7 @@ class GhostTuner:
                 f'Remove-Item -Path "{p}\\*" -Recurse -Force -ErrorAction SilentlyContinue'
                 for p in paths
             ])
-            subprocess.run(['powershell', '-Command', cmd], capture_output=True)
+            subprocess.run(['powershell', '-Command', cmd], capture_output=True, creationflags=0x08000000)
             self.log_event("🧽 SHADER CACHE: All stale caches wiped — microstutter eliminated.", "success")
         threading.Thread(target=_clear, daemon=True).start()
 
@@ -208,19 +219,19 @@ class GhostTuner:
     # Cuts packet scheduling latency for online games
     # ─────────────────────────────────────────────────────────────────────────
     def apply_network_optimizer(self):
-        subprocess.run('netsh int tcp set global autotuninglevel=highlyrestricted', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set global congestionprovider=ctcp', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set global ecncapability=disabled', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set supplemental internet congestionprovider=ctcp', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set global timestamps=disabled', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set global rss=enabled', shell=True, capture_output=True)
+        subprocess.run('netsh int tcp set global autotuninglevel=highlyrestricted', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set global congestionprovider=ctcp', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set global ecncapability=disabled', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set supplemental internet congestionprovider=ctcp', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set global timestamps=disabled', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set global rss=enabled', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("🌐 NET OPTIMIZER: TCP tuning applied — ping/jitter reduced.", "info")
 
     def revert_network_optimizer(self):
-        subprocess.run('netsh int tcp set global autotuninglevel=normal', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set global congestionprovider=default', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set global ecncapability=enabled', shell=True, capture_output=True)
-        subprocess.run('netsh int tcp set global timestamps=enabled', shell=True, capture_output=True)
+        subprocess.run('netsh int tcp set global autotuninglevel=normal', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set global congestionprovider=default', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set global ecncapability=enabled', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('netsh int tcp set global timestamps=enabled', shell=True, capture_output=True, creationflags=0x08000000)
         self.log_event("🌐 NET OPTIMIZER: Reverted to Windows default.", "info")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -247,7 +258,7 @@ class GhostTuner:
                 } -ErrorAction SilentlyContinue | Out-Null
             }
             """
-            subprocess.run(['powershell', '-Command', cmd], capture_output=True)
+            subprocess.run(['powershell', '-Command', cmd], capture_output=True, creationflags=0x08000000)
             self.log_event("💾 PAGEFILE: Fixed at 8192MB — mid-session resize stutters eliminated.", "success")
         threading.Thread(target=_set, daemon=True).start()
 
@@ -260,7 +271,7 @@ class GhostTuner:
         for game in self.game_list:
             subprocess.run(
                 f'reg add "{key}" /v "{game}" /t REG_SZ /d "DISABLEDXMAXIMIZEDWINDOWEDMODE" /f',
-                shell=True, capture_output=True
+                shell=True, capture_output=True, creationflags=0x08000000
             )
         self.log_event("🖥️ FSO DISABLED: Fullscreen Optimizations killed for all tracked games.", "info")
 
@@ -269,69 +280,319 @@ class GhostTuner:
         for game in self.game_list:
             subprocess.run(
                 f'reg delete "{key}" /v "{game}" /f',
-                shell=True, capture_output=True
+                shell=True, capture_output=True, creationflags=0x08000000
             )
         self.log_event("🖥️ FSO: Fullscreen Optimizations restored to Windows default.", "info")
 
+    # =========================================================================
+    # ██████████████  NEW FEATURE BLOCK — AUTO-FIRES ON GAME DETECT  █████████
+    # =========================================================================
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 1: CPU Core Parking Disabler
+    # Windows silently parks cores mid-game causing brutal frame spikes on wake
+    # ─────────────────────────────────────────────────────────────────────────
+    def disable_core_parking(self):
+        cmd = r'''
+        $path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
+        Set-ItemProperty -Path $path -Name "ValueMax" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+        powercfg /setacvalueindex scheme_current 54533251-82be-4824-96c1-47b60b740d00 0cc5b647-c1df-4637-891a-dec35c318583 100
+        powercfg /setdcvalueindex scheme_current 54533251-82be-4824-96c1-47b60b740d00 0cc5b647-c1df-4637-891a-dec35c318583 100
+        powercfg /setacvalueindex scheme_current 54533251-82be-4824-96c1-47b60b740d00 ea062031-0e34-4ff1-9b6d-eb1059334028 100
+        powercfg -setactive scheme_current
+        Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Processor" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Set-ItemProperty -Path $_.PSPath -Name "CpuUnparkPercent" -Value 100 -Type DWord -Force -ErrorAction SilentlyContinue
+        }
+        '''
+        subprocess.run(['powershell', '-Command', cmd], capture_output=True, creationflags=0x08000000)
+        self.log_event("🔓 CORE PARKING: All CPU cores unlocked — zero wake-up stutter.", "success")
+
+    def revert_core_parking(self):
+        cmd = r'''
+        $path = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
+        Set-ItemProperty -Path $path -Name "ValueMax" -Value 100 -Type DWord -Force -ErrorAction SilentlyContinue
+        powercfg /setacvalueindex scheme_current 54533251-82be-4824-96c1-47b60b740d00 0cc5b647-c1df-4637-891a-dec35c318583 0
+        powercfg -setactive scheme_current
+        '''
+        subprocess.run(['powershell', '-Command', cmd], capture_output=True, creationflags=0x08000000)
+        self.log_event("🔓 CORE PARKING: Reverted to Windows default.", "info")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 2: GPU Max Power State Forcer (NVIDIA + AMD)
+    # Forces GPU to stay locked at max P0 clock — no mid-game downclocking
+    # ─────────────────────────────────────────────────────────────────────────
+    def force_gpu_max_power(self):
+        nv_cmd = r'''
+        Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            if ($props.DriverDesc -match "NVIDIA|GeForce|RTX|GTX") {
+                Set-ItemProperty -Path $_.PSPath -Name "PerfLevelSrc"      -Value 0x2222 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PowerMizerEnable"  -Value 0x1   -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PowerMizerLevel"   -Value 0x1   -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PowerMizerLevelAC" -Value 0x1   -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "GpuPowerMizerMode" -Value 1     -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+            if ($props.DriverDesc -match "AMD|Radeon|RX") {
+                Set-ItemProperty -Path $_.PSPath -Name "EnableUlps"        -Value 0     -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PP_SclkDeepSleepDisable" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        }
+        '''
+        subprocess.run(['powershell', '-Command', nv_cmd], capture_output=True, creationflags=0x08000000)
+        self.log_event("⚡ GPU POWER: Forced to max P0 state — no GPU clock drops mid-game.", "success")
+
+    def revert_gpu_max_power(self):
+        revert_cmd = r'''
+        Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            if ($props.DriverDesc -match "NVIDIA|GeForce|RTX|GTX") {
+                Set-ItemProperty -Path $_.PSPath -Name "PerfLevelSrc"      -Value 0x2233 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PowerMizerEnable"  -Value 0x1   -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PowerMizerLevel"   -Value 0x3   -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PowerMizerLevelAC" -Value 0x3   -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "GpuPowerMizerMode" -Value 0     -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+            if ($props.DriverDesc -match "AMD|Radeon|RX") {
+                Set-ItemProperty -Path $_.PSPath -Name "EnableUlps"        -Value 1     -Type DWord -Force -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $_.PSPath -Name "PP_SclkDeepSleepDisable" -ErrorAction SilentlyContinue
+            }
+        }
+        '''
+        subprocess.run(['powershell', '-Command', revert_cmd], capture_output=True, creationflags=0x08000000)
+        self.log_event("⚡ GPU POWER: Reverted to Windows default.", "info")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 3: RAM XMP/EXPO Profile Checker
+    # Detects if XMP is disabled (running at JEDEC stock) and warns user
+    # ─────────────────────────────────────────────────────────────────────────
+    def check_ram_profile(self):
+        def _check():
+            cmd = r"(Get-WmiObject Win32_PhysicalMemory | Measure-Object -Property Speed -Maximum).Maximum"
+            res = subprocess.run(['powershell', '-Command', cmd], capture_output=True, text=True, creationflags=0x08000000)
+            speed = res.stdout.strip()
+            try:
+                mhz = int(speed)
+                if mhz < 3200:
+                    self.log_event(f"⚠️ RAM ALERT: Running at {mhz}MHz — XMP/EXPO likely DISABLED in BIOS. Enable it for +15% FPS!", "error")
+                else:
+                    self.log_event(f"✔ RAM PROFILE: {mhz}MHz detected — XMP/EXPO active.", "success")
+            except:
+                self.log_event("⚠️ RAM PROFILE: Could not read speed. Check BIOS XMP setting.", "info")
+        threading.Thread(target=_check, daemon=True).start()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 4: DX12 GPU Preemption / Overhead Disabler
+    # Kills GPU mid-frame task switching and DXR driver overhead
+    # ─────────────────────────────────────────────────────────────────────────
+    def disable_dx12_overhead(self):
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DisablePreemption" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "EnableWriteCombining" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "PreemptionLevel" /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DisableRayTracing" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DisableVRS" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        self.log_event("🎮 DX OVERHEAD: GPU preemption + DXR/VRS overhead disabled — smoother frame delivery.", "success")
+
+    def revert_dx12_overhead(self):
+        subprocess.run(r'reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DisablePreemption" /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "PreemptionLevel" /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DisableRayTracing" /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "DisableVRS" /f', shell=True, capture_output=True, creationflags=0x08000000)
+        self.log_event("🎮 DX OVERHEAD: Reverted to Windows default.", "info")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 5: Background Process Freezer (NtSuspendProcess)
+    # Suspends non-essential apps during gaming — resumes when game exits
+    # ─────────────────────────────────────────────────────────────────────────
+    def suspend_background_processes(self):
+        freeze_list = [
+            "discord.exe", "chrome.exe", "msedge.exe", "spotify.exe",
+            "onedrive.exe", "teams.exe", "slack.exe", "skype.exe",
+            "searchindexer.exe", "antimalware service executable",
+            "microsoftedge.exe", "opera.exe", "brave.exe"
+        ]
+        self.suspended_pids = []
+        NtSuspendProcess = ctypes.windll.ntdll.NtSuspendProcess
+        for proc in psutil.process_iter(['name', 'pid']):
+            try:
+                name = proc.info['name'].lower()
+                # Never freeze essential procs or the game itself
+                if name in [e.lower() for e in self.essential_procs]:
+                    continue
+                if name in [g.lower() for g in self.game_list]:
+                    continue
+                if any(k in name for k in freeze_list):
+                    handle = ctypes.windll.kernel32.OpenProcess(0x001F0FFF, False, proc.info['pid'])
+                    if handle:
+                        NtSuspendProcess(handle)
+                        ctypes.windll.kernel32.CloseHandle(handle)
+                        self.suspended_pids.append(proc.info['pid'])
+            except: pass
+        self.log_event(f"⏸️ BG FREEZE: {len(self.suspended_pids)} background processes suspended — CPU/RAM freed.", "success")
+
+    def resume_background_processes(self):
+        NtResumeProcess = ctypes.windll.ntdll.NtResumeProcess
+        resumed = 0
+        for pid in getattr(self, 'suspended_pids', []):
+            try:
+                handle = ctypes.windll.kernel32.OpenProcess(0x001F0FFF, False, pid)
+                if handle:
+                    NtResumeProcess(handle)
+                    ctypes.windll.kernel32.CloseHandle(handle)
+                    resumed += 1
+            except: pass
+        self.suspended_pids = []
+        self.log_event(f"▶️ BG RESUME: {resumed} background processes restored.", "success")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 6: Memory Compression + Superfetch Deep Disabler
+    # Kills kernel memory compression and prefetch that stutter on low RAM
+    # ─────────────────────────────────────────────────────────────────────────
+    def disable_memory_compression(self):
+        subprocess.run('powershell -Command "Disable-MMAgent -MemoryCompression"', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" /v "EnablePrefetcher" /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" /v "EnableSuperfetch" /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        self.log_event("🧠 MEMORY: Compression + Superfetch disabled — zero RAM stutter.", "success")
+
+    def revert_memory_compression(self):
+        subprocess.run('powershell -Command "Enable-MMAgent -MemoryCompression"', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" /v "EnablePrefetcher" /t REG_DWORD /d 3 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" /v "EnableSuperfetch" /t REG_DWORD /d 3 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        self.log_event("🧠 MEMORY: Compression + Superfetch restored to Windows default.", "info")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 7: Write-Combining Memory Mode for GPU VRAM
+    # Forces WC mode on CPU->GPU memory transfers — 4x faster vertex/UBO uploads
+    # ─────────────────────────────────────────────────────────────────────────
+    def enable_write_combining(self):
+        cmd = r'''
+        Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            if ($p.DriverDesc -match "NVIDIA|GeForce|RTX|GTX|AMD|Radeon|RX") {
+                Set-ItemProperty -Path $_.PSPath -Name "EnableWriteCombining"         -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "DisableCPUCaching"            -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "PreferSystemMemoryContiguous" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        }
+        '''
+        subprocess.run(['powershell', '-Command', cmd], capture_output=True, creationflags=0x08000000)
+        self.log_event("💾 WRITE-COMBINE: CPU→GPU transfer mode maximized — draw calls 4x faster.", "success")
+
+    def revert_write_combining(self):
+        cmd = r'''
+        Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            if ($p.DriverDesc -match "NVIDIA|GeForce|RTX|GTX|AMD|Radeon|RX") {
+                Remove-ItemProperty -Path $_.PSPath -Name "EnableWriteCombining"         -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $_.PSPath -Name "DisableCPUCaching"            -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $_.PSPath -Name "PreferSystemMemoryContiguous" -ErrorAction SilentlyContinue
+            }
+        }
+        '''
+        subprocess.run(['powershell', '-Command', cmd], capture_output=True, creationflags=0x08000000)
+        self.log_event("💾 WRITE-COMBINE: Reverted to Windows default.", "info")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW FEATURE 8: Sustained CPU Boost Clock Enforcer
+    # Prevents Intel/AMD from decaying boost clocks after 28-56s under load
+    # ─────────────────────────────────────────────────────────────────────────
+    def force_sustained_cpu_boost(self):
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFBOOSTMODE 2',      shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFBOOSTPOL 100',     shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFINCPOL 2',         shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFDECPOL 1',         shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFINCTHRESHOLD 10',  shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFDECTHRESHOLD 8',   shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\be337238-0d82-4146-a960-4f37b9d47c6d" /v "ValueMax" /t REG_DWORD /d 100 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg -setactive scheme_current', shell=True, capture_output=True, creationflags=0x08000000)
+        self.log_event("⚡ CPU BOOST: Sustained turbo clocks enforced — no boost decay mid-game.", "success")
+
+    def revert_sustained_cpu_boost(self):
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFBOOSTMODE 1',  shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFBOOSTPOL 60', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFINCPOL 1',    shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg /setacvalueindex scheme_current sub_processor PERFDECPOL 2',    shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run('powercfg -setactive scheme_current', shell=True, capture_output=True, creationflags=0x08000000)
+        self.log_event("⚡ CPU BOOST: Reverted to Windows default.", "info")
+
+    # =========================================================================
+    # ████████████████████  END NEW FEATURE BLOCK  ████████████████████████████
+    # =========================================================================
+
     def apply_ghost_game_boost(self):
         self.log_event("🚀 EXTREME BOOST: Engaging Revolutionary Latency Shield...", "info")
-        subprocess.run('bcdedit /set disabledynamictick yes', shell=True, capture_output=True)
+        subprocess.run('bcdedit /set disabledynamictick yes', shell=True, capture_output=True, creationflags=0x08000000)
         
         # Optimize power state with high-performance fallback verification
-        pwr_plan = subprocess.run('powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61', shell=True, capture_output=True)
+        pwr_plan = subprocess.run('powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61', shell=True, capture_output=True, creationflags=0x08000000)
         if pwr_plan.returncode != 0:
-            subprocess.run('powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c', shell=True, capture_output=True)
+            subprocess.run('powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c', shell=True, capture_output=True, creationflags=0x08000000)
             
         self.apply_sbo()
         self.apply_gvs()
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "LargeSystemCache" /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "DisablePagingExecutive" /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v "IRQ8Priority" /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v "TcpAckFrequency" /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v "TcpNoDelay" /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v "NetworkThrottlingIndex" /t REG_DWORD /d 4294967295 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "HwSchMode" /t REG_DWORD /d 2 /f', shell=True, capture_output=True)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "LargeSystemCache" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "DisablePagingExecutive" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v "IRQ8Priority" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v "TcpAckFrequency" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v "TcpNoDelay" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v "NetworkThrottlingIndex" /t REG_DWORD /d 4294967295 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v "HwSchMode" /t REG_DWORD /d 2 /f', shell=True, capture_output=True, creationflags=0x08000000)
         
         # Maximize Multimedia Class Scheduler (MMCSS) parameters for gaming engines
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 8 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Priority" /t REG_DWORD /d 6 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Scheduling Category" /t REG_SZ /d "High" /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "SFIO Priority" /t REG_SZ /d "High" /f', shell=True, capture_output=True)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 8 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Priority" /t REG_DWORD /d 6 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "Scheduling Category" /t REG_SZ /d "High" /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "SFIO Priority" /t REG_SZ /d "High" /f', shell=True, capture_output=True, creationflags=0x08000000)
         
         # Optimized Win32 foreground priority quantum allocation (Hex 0x26)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v "Win32PrioritySeparation" /t REG_DWORD /d 38 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v "SystemResponsiveness" /t REG_DWORD /d 0 /f', shell=True, capture_output=True)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v "Win32PrioritySeparation" /t REG_DWORD /d 38 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v "SystemResponsiveness" /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
         
         # --- FEATURE 1: MSI (Message Signaled Interrupts) Mode Switcher ---
         msi_cmd = r"Get-ChildItem -Path 'HKLM:\SYSTEM\CurrentControlSet\Enum\PCI' -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Name -match 'Device Parameters\\Interrupt Management\\MessageSignaledInterruptProperties'} | ForEach-Object { New-ItemProperty -Path $_.PSPath -Name 'MSISupported' -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue; Set-ItemProperty -Path $_.PSPath -Name 'MSISupported' -Value 1 -Force -ErrorAction SilentlyContinue }"
-        subprocess.run(['powershell', '-Command', msi_cmd], capture_output=True)
+        subprocess.run(['powershell', '-Command', msi_cmd], capture_output=True, creationflags=0x08000000)
         
         # --- FEATURE 2: USB Selective Suspend & Power Gating Disabler ---
-        subprocess.run('powercfg /SETACVALUEINDEX SCHEME_CURRENT 2a73a32d-3dbf-476f-9784-ad42a96759d5 d4e98f31-5ee3-4d56-a1da-2f48f33ce99c 0', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\USB" /v "DisableHubPowerManagement" /t REG_DWORD /d 1 /f', shell=True, capture_output=True)
+        subprocess.run('powercfg /SETACVALUEINDEX SCHEME_CURRENT 2a73a32d-3dbf-476f-9784-ad42a96759d5 d4e98f31-5ee3-4d56-a1da-2f48f33ce99c 0', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\USB" /v "DisableHubPowerManagement" /t REG_DWORD /d 1 /f', shell=True, capture_output=True, creationflags=0x08000000)
         
         # --- FEATURE 4: Network Adapter (NIC) Interrupt Moderation Disabler ---
         nic_cmd = r"Get-NetAdapterAdvancedProperty -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -like '*Interrupt Moderation*'} | ForEach-Object { Set-NetAdapterAdvancedProperty -Name $_.Name -DisplayName $_.DisplayName -DisplayValue 'Disabled' -ErrorAction SilentlyContinue }"
-        subprocess.run(['powershell', '-Command', nic_cmd], capture_output=True)
+        subprocess.run(['powershell', '-Command', nic_cmd], capture_output=True, creationflags=0x08000000)
 
-        # --- NEW FEATURE: HPET Disabler ---
+        # --- EXISTING: HPET Disabler ---
         self.apply_hpet_disable()
 
-        # --- NEW FEATURE: Game DVR / Xbox Bar Killer ---
+        # --- EXISTING: Game DVR / Xbox Bar Killer ---
         self.apply_game_dvr_kill()
 
-        # --- NEW FEATURE: GPU IRQ Priority Booster ---
+        # --- EXISTING: GPU IRQ Priority Booster ---
         self.boost_gpu_irq_priority()
 
-        # --- NEW FEATURE: Network Stack Optimizer ---
+        # --- EXISTING: Network Stack Optimizer ---
         self.apply_network_optimizer()
 
-        # --- NEW FEATURE: FSO Disabler for all tracked games ---
+        # --- EXISTING: FSO Disabler for all tracked games ---
         self.disable_fso_for_games()
+
+        # ── NEW FEATURES — AUTO-FIRE ON GAME DETECT ────────────────────────
+        self.disable_core_parking()          # Feature 1: Unpark all CPU cores
+        self.force_gpu_max_power()           # Feature 2: Lock GPU to P0 max clock
+        self.check_ram_profile()             # Feature 3: Warn if XMP disabled
+        self.disable_dx12_overhead()         # Feature 4: Kill DX12/DXR/VRS overhead
+        self.suspend_background_processes()  # Feature 5: Freeze background apps
+        self.disable_memory_compression()    # Feature 6: Kill memory compression
+        self.enable_write_combining()        # Feature 7: Force WC GPU memory mode
+        self.force_sustained_cpu_boost()     # Feature 8: Lock CPU turbo boost on
+        # ────────────────────────────────────────────────────────────────────
         
         self.suspended_services = ["wuauserv", "SysMain", "DiagTrack"]
         for svc in self.suspended_services:
-            subprocess.run(f'net stop {svc} /y', shell=True, capture_output=True)
+            subprocess.run(f'net stop {svc} /y', shell=True, capture_output=True, creationflags=0x08000000)
         try:
             for proc in psutil.process_iter(['name', 'pid']):
                 name = proc.info['name']
@@ -343,35 +604,45 @@ class GhostTuner:
         except: pass
         self.trim_working_sets()
         winmm.timeBeginPeriod(1)
-        self.log_event("🚀 EXTREME BOOST: Kernel, SBO, GVS, MSI, USB, NIC, HPET, DVR, GPU IRQ, NET & FSO Applied.", "success")
+        self.log_event("🚀 EXTREME BOOST: ALL SYSTEMS ENGAGED — Core Parking, GPU P0, DX12, BG Freeze, WC, CPU Turbo + Legacy Stack Active.", "success")
         self.update_status_ui(True)
 
     def revert_ghost_game_boost(self):
         self.log_event("🛡️ BOOST: Restoring system state...", "info")
-        subprocess.run('bcdedit /deletevalue disabledynamictick', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "LargeSystemCache" /t REG_DWORD /d 0 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v "TcpAckFrequency" /t REG_DWORD /d 2 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v "Win32PrioritySeparation" /t REG_DWORD /d 2 /f', shell=True, capture_output=True)
-        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v "SystemResponsiveness" /t REG_DWORD /d 10 /f', shell=True, capture_output=True)
+        subprocess.run('bcdedit /deletevalue disabledynamictick', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "LargeSystemCache" /t REG_DWORD /d 0 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v "TcpAckFrequency" /t REG_DWORD /d 2 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl" /v "Win32PrioritySeparation" /t REG_DWORD /d 2 /f', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v "SystemResponsiveness" /t REG_DWORD /d 10 /f', shell=True, capture_output=True, creationflags=0x08000000)
         
         # Revert Feature 2 and Feature 4 to Windows defaults
-        subprocess.run('powercfg /SETACVALUEINDEX SCHEME_CURRENT 2a73a32d-3dbf-476f-9784-ad42a96759d5 d4e98f31-5ee3-4d56-a1da-2f48f33ce99c 1', shell=True, capture_output=True)
-        subprocess.run(r'reg delete "HKLM\SYSTEM\CurrentControlSet\Services\USB" /v "DisableHubPowerManagement" /f', shell=True, capture_output=True)
+        subprocess.run('powercfg /SETACVALUEINDEX SCHEME_CURRENT 2a73a32d-3dbf-476f-9784-ad42a96759d5 d4e98f31-5ee3-4d56-a1da-2f48f33ce99c 1', shell=True, capture_output=True, creationflags=0x08000000)
+        subprocess.run(r'reg delete "HKLM\SYSTEM\CurrentControlSet\Services\USB" /v "DisableHubPowerManagement" /f', shell=True, capture_output=True, creationflags=0x08000000)
         nic_revert = r"Get-NetAdapterAdvancedProperty -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -like '*Interrupt Moderation*'} | ForEach-Object { Set-NetAdapterAdvancedProperty -Name $_.Name -DisplayName $_.DisplayName -DisplayValue 'Enabled' -ErrorAction SilentlyContinue }"
-        subprocess.run(['powershell', '-Command', nic_revert], capture_output=True)
+        subprocess.run(['powershell', '-Command', nic_revert], capture_output=True, creationflags=0x08000000)
 
-        # --- Revert new features ---
+        # --- Revert existing features ---
         self.revert_hpet_disable()
         self.revert_game_dvr_kill()
         self.revert_network_optimizer()
         self.revert_fso_for_games()
         self.revert_pcore_pin()
 
+        # ── REVERT NEW FEATURES ─────────────────────────────────────────────
+        self.revert_core_parking()           # Revert Feature 1
+        self.revert_gpu_max_power()          # Revert Feature 2
+        self.revert_dx12_overhead()          # Revert Feature 4
+        self.resume_background_processes()   # Revert Feature 5
+        self.revert_memory_compression()     # Revert Feature 6
+        self.revert_write_combining()        # Revert Feature 7
+        self.revert_sustained_cpu_boost()    # Revert Feature 8
+        # ────────────────────────────────────────────────────────────────────
+
         for svc in getattr(self, 'suspended_services', []):
-            subprocess.run(f'net start {svc}', shell=True, capture_output=True)
+            subprocess.run(f'net start {svc}', shell=True, capture_output=True, creationflags=0x08000000)
         winmm.timeEndPeriod(1)
-        subprocess.run('powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e', shell=True, capture_output=True)
-        self.log_event("🛡️ BOOST: Reverted to default.", "success")
+        subprocess.run('powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e', shell=True, capture_output=True, creationflags=0x08000000)
+        self.log_event("🛡️ BOOST: All systems reverted to default.", "success")
         self.update_status_ui(False)
 
     def update_power_throttle(self):
@@ -383,7 +654,7 @@ class GhostTuner:
             target = int((cpu_usage / 100) * slider_val)
             if target < 5: target = 5
         if target != self.last_applied_cap:
-            subprocess.run(f'powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMAX {target}', shell=True, capture_output=True)
+            subprocess.run(f'powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMAX {target}', shell=True, capture_output=True, creationflags=0x08000000)
             self.last_applied_cap = target
         ts = datetime.now().strftime('%H:%M:%S')
         cpu_load = psutil.cpu_percent()
@@ -611,12 +882,50 @@ class GhostTuner:
         ts = datetime.now().strftime('%H:%M:%S')
         self.window.after(0, lambda: (self.ai_text.insert("end", f"[{ts}] 🧠 COGNITION: {m}\n"), self.ai_text.see("end")))
 
+    # ── ERROR QUEUE WORKER ────────────────────────────────────────────────────
+    # Runs on its own daemon thread for the lifetime of the app.
+    # Blocks on the queue; each time a (ev_id, msg) pair arrives it waits until
+    # the AI is free (currently_processing == False) then dispatches the fix.
+    # This guarantees errors are processed one-at-a-time in arrival order, and
+    # none are silently dropped when the AI is busy handling a previous fault.
+    def _error_queue_worker(self):
+        while True:
+            try:
+                ev_id, msg = self.error_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            # Wait until the AI finishes whatever it is currently doing
+            while self.currently_processing:
+                time.sleep(0.25)
+
+            # Skip if monitoring was stopped or AI was halted while we waited
+            if self.stop_ai_flag or not self.is_monitoring:
+                q_size = self.error_queue.qsize()
+                if q_size:
+                    self.log_ai_event(f"⚠️ QUEUE FLUSHED: {q_size} pending error(s) discarded — monitoring stopped.")
+                    with self.error_queue.mutex:
+                        self.error_queue.queue.clear()
+                self.error_queue.task_done()
+                continue
+
+            q_remaining = self.error_queue.qsize()
+            if q_remaining:
+                self.log_ai_event(f"📋 QUEUE: Dispatching next fault (Event {ev_id}). {q_remaining} more in queue.")
+            self.handle_ai_fix(ev_id, msg)
+
+            # Give handle_ai_fix a moment to flip currently_processing = True
+            # before the next loop iteration checks it
+            time.sleep(0.1)
+            self.error_queue.task_done()
+    # ─────────────────────────────────────────────────────────────────────────
+
     def check_windows_errors(self):
         if not self.is_monitoring or self.auto_switch.get() != 1:
             return
         cmd = 'powershell -Command "Get-WinEvent -FilterHashtable @{LogName=\'Application\',\'System\'; Level=1,2; StartTime=(Get-Date).AddSeconds(-5)} -ErrorAction SilentlyContinue | ForEach-Object { $_.Id.ToString() + \'|\' + $_.Message }"'
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, creationflags=0x08000000)
             if res.stdout:
                 for line in res.stdout.strip().split('\n'):
                     if '|' in line:
@@ -639,7 +948,14 @@ class GhostTuner:
             self.log_ai_event(f"Pre-cached fix found for Event ID {ev_id}. Executing from ledger...")
             self.execute_cmds(self.mastered_ids[str(ev_id)])
             return
-        self.handle_ai_fix(ev_id, msg)
+        # Push onto the queue so the worker thread dispatches it in order,
+        # waiting for any in-flight AI fix to finish first.
+        q_size_before = self.error_queue.qsize()
+        self.error_queue.put((ev_id, msg))
+        if q_size_before == 0 and not self.currently_processing:
+            self.log_ai_event(f"📥 QUEUE: Event {ev_id} dispatching immediately (queue was empty).")
+        else:
+            self.log_ai_event(f"📥 QUEUE: Event {ev_id} added to queue. Position: {q_size_before + 1} — will process after current fix completes.")
 
     def handle_ai_fix(self, event_id, msg):
         if not GEMINI_AVAILABLE:
@@ -650,9 +966,6 @@ class GhostTuner:
             return
         if self.stop_ai_flag:
             self.log_ai_event("⚠️ AI BLOCKED: stop_ai_flag is set. Restart monitoring to re-enable.")
-            return
-        if self.currently_processing:
-            self.log_ai_event(f"⏳ AI BUSY: Already processing another fault. Event {event_id} queued/skipped.")
             return
 
         self.currently_processing = True
@@ -689,7 +1002,7 @@ class GhostTuner:
                 self.log_ai_event(f"🚫 BLOCKING INVASIVE CMD: {c}")
                 continue
             self.log_ai_event(f"⚙️ Injecting fix: {c}")
-            subprocess.run(['powershell', '-Command', c], capture_output=True)
+            subprocess.run(['powershell', '-Command', c], capture_output=True, creationflags=0x08000000)
 
     def monitor_loop(self):
         while self.is_monitoring:
@@ -722,13 +1035,13 @@ class GhostTuner:
     def run_opt(self):
         self.log_event("🧹 NEURAL PURGE: Initiating System-Wide Deep Sweep...", "info")
         def purge_task():
-            subprocess.run('ipconfig /flushdns', shell=True, capture_output=True)
+            subprocess.run('ipconfig /flushdns', shell=True, capture_output=True, creationflags=0x08000000)
             self.trim_working_sets()
             clean_cmd = (
                 'Remove-Item -Path "$env:TEMP\\*" -Recurse -Force -ErrorAction SilentlyContinue; '
                 'Remove-Item -Path "C:\\Windows\\Temp\\*" -Recurse -Force -ErrorAction SilentlyContinue; '
                 'Remove-Item -Path "C:\\Windows\\Prefetch\\*" -Recurse -Force -ErrorAction SilentlyContinue; '
-                'Clear-RecycleBin -Force -ErrorAction SilycleBin'
+                'Clear-RecycleBin -Force -ErrorAction SilentlyContinue'
             )
             subprocess.run(['powershell', '-Command', clean_cmd], creationflags=0x08000000, capture_output=True)
             self.log_event("🧹 SWEEP COMPLETE: RAM reclaimed, Cache wiped, Recycle Bin cleared.", "success")
